@@ -79,6 +79,15 @@ const GROUP_MODEL = 'Speaker Group';
 // How often to re-poll a speaker after a playback action so new track details and art show sooner
 const REFRESH_DELAYS = [1500, 4000, 8000];
 
+// How long to show a requested volume before trusting the speaker's reported level again
+const VOLUME_HOLD_MS = 20000;
+
+interface PendingVolume {
+  entity: string;
+  percent: number;
+  until: number;
+}
+
 @customElement('alexa-music-player-card')
 export class AlexaMusicPlayerCard extends LitElement implements MusicPlayer {
   @property({ attribute: false }) public hass?: HomeAssistant;
@@ -95,6 +104,9 @@ export class AlexaMusicPlayerCard extends LitElement implements MusicPlayer {
   @internalProperty() private _query = '';
 
   @internalProperty() private _error?: string;
+
+  // Volume just requested, shown until the speaker reports it so repeated taps build on it
+  @internalProperty() private _pendingVolume?: PendingVolume;
 
   private _unsubscribe?: () => void;
 
@@ -281,7 +293,7 @@ export class AlexaMusicPlayerCard extends LitElement implements MusicPlayer {
     const attrs = stateObj?.attributes || {};
     const unavailable = !stateObj || stateObj.state === 'unavailable';
     const playing = stateObj?.state === 'playing';
-    const volume = Math.round((attrs.volume_level ?? 0) * 100);
+    const volume = this._displayVolume(this._active, Math.round((attrs.volume_level ?? 0) * 100));
 
     return html`
       <ha-card .header=${this._config.title}>
@@ -440,9 +452,25 @@ export class AlexaMusicPlayerCard extends LitElement implements MusicPlayer {
     );
   }
 
+  private _displayVolume(entity: string, reported: number): number {
+    const pending = this._pendingVolume;
+    if (!pending || pending.entity !== entity || pending.percent === reported || Date.now() > pending.until) {
+      return reported;
+    }
+    return pending.percent;
+  }
+
   private _changeVolume(percent: number): void {
-    const level = Math.min(100, Math.max(0, percent)) / 100;
-    this._call('volume_set', { volume_level: level });
+    const entity = this._active!;
+    const clamped = Math.min(100, Math.max(0, percent));
+    this._pendingVolume = { entity, percent: clamped, until: Date.now() + VOLUME_HOLD_MS };
+    this._error = undefined;
+    this._call('volume_set', { volume_level: clamped / 100 })
+      .then(() => this._refreshSoon([entity]))
+      .catch(err => {
+        this._pendingVolume = undefined;
+        this._error = (err as Error).message || String(err);
+      });
   }
 
   private _search(ev: Event): void {
