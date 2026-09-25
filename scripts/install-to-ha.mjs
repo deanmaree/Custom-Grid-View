@@ -3,7 +3,7 @@
 // card to a dashboard, through the Home Assistant websocket API (Node 22+).
 //
 //   HA_URL=https://example.ui.nabu.casa HA_TOKEN=... node scripts/install-to-ha.mjs --list
-//   HA_URL=... HA_TOKEN=... node scripts/install-to-ha.mjs --resource <url> [--dashboard <url_path>] [--view <n>] [--dry-run]
+//   HA_URL=... HA_TOKEN=... node scripts/install-to-ha.mjs --resource <url> [--dashboard <url_path>] [--view <path|index>] [--dry-run]
 //
 // The dashboard's previous config is written to ha-backup-<dashboard>.json before saving.
 import { writeFileSync } from 'fs';
@@ -73,8 +73,17 @@ const main = async () => {
   const resourceUrl = option('--resource');
   if (!resourceUrl) throw new Error('--resource <url> is required');
   const dashboard = option('--dashboard') || null;
-  const viewIndex = Number(option('--view') || 0);
+  const viewOption = option('--view') || '0';
   const dryRun = flag('--dry-run');
+
+  // Look up the dashboard and view first so a typo changes nothing
+  const config = await send('lovelace/config', { url_path: dashboard, force: false });
+  // --view takes the view's path (the last part of its URL) or its index
+  const views = config.views || [];
+  let viewIndex = views.findIndex(v => v.path === viewOption);
+  if (viewIndex === -1 && /^\d+$/.test(viewOption)) viewIndex = Number(viewOption);
+  const view = views[viewIndex];
+  if (!view) throw new Error(`Dashboard has no view "${viewOption}"`);
 
   // Resource: update an existing grid-view.js entry, or create one
   const resources = await send('lovelace/resources');
@@ -90,13 +99,10 @@ const main = async () => {
   }
 
   // Card: append to the chosen view unless it is already on the dashboard
-  const config = await send('lovelace/config', { url_path: dashboard, force: false });
   if (JSON.stringify(config).includes(CARD.type)) {
     console.log('Card already on the dashboard');
     return;
   }
-  const view = config.views?.[viewIndex];
-  if (!view) throw new Error(`Dashboard has no view ${viewIndex}`);
 
   const updated = structuredClone(config);
   const target = updated.views[viewIndex];
