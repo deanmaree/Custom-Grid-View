@@ -2,7 +2,6 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import {
-  mdiClose,
   mdiMagnify,
   mdiMusic,
   mdiPause,
@@ -28,22 +27,13 @@ import {
   LitElement,
   property,
   PropertyValues,
-  svg,
   TemplateResult,
 } from 'lit-element';
-import {
-  addRecent,
-  emptyLibrary,
-  loadLibrary,
-  MusicItem,
-  MusicLibrary,
-  sameItem,
-  saveLibrary,
-  toggleFavorite,
-} from './music-library';
+import { addRecent, MusicItem, MusicLibrary, MusicPlayer, musicStore, sameItem, toggleFavorite } from './music-library';
+import { icon, iconButton, iconButtonStyles } from './ui';
 
 // Music services linked in the Alexa app, keyed by the names used in the card config
-const PROVIDERS: { [key: string]: string } = {
+export const PROVIDERS: { [key: string]: string } = {
   AMAZON_MUSIC: 'Amazon Music',
   SPOTIFY: 'Spotify',
   APPLE_MUSIC: 'Apple Music',
@@ -66,11 +56,8 @@ interface AlexaMusicPlayerCardConfig extends LovelaceCardConfig {
   entities?: Array<string | SpeakerConfig>;
   default_entity?: string;
   provider?: string;
+  // Shown at the top of the Alexa Music List card's Favourites
   presets?: MusicPreset[];
-  // Same as presets
-  favorites?: MusicPreset[];
-  // Set to false to hide the Favourites/Recent list
-  show_list?: boolean;
 }
 
 interface SpeakerConfig {
@@ -93,7 +80,7 @@ const GROUP_MODEL = 'Speaker Group';
 const REFRESH_DELAYS = [1500, 4000, 8000];
 
 @customElement('alexa-music-player-card')
-export class AlexaMusicPlayerCard extends LitElement {
+export class AlexaMusicPlayerCard extends LitElement implements MusicPlayer {
   @property({ attribute: false }) public hass?: HomeAssistant;
 
   @internalProperty() private _config?: AlexaMusicPlayerCardConfig;
@@ -109,13 +96,7 @@ export class AlexaMusicPlayerCard extends LitElement {
 
   @internalProperty() private _error?: string;
 
-  @internalProperty() private _library: MusicLibrary = emptyLibrary();
-
-  @internalProperty() private _tab: 'favorites' | 'recent' = 'favorites';
-
-  private _libraryLoaded = false;
-
-  private _saveTimer?: number;
+  private _unsubscribe?: () => void;
 
   // Last track seen on each speaker, so each new song is added to Recent once
   private _lastTracks: { [entity: string]: string } = {};
@@ -142,20 +123,53 @@ export class AlexaMusicPlayerCard extends LitElement {
     return { columns: 12, rows: 'auto', min_columns: 6 };
   }
 
+  public connectedCallback(): void {
+    super.connectedCallback();
+    this._unsubscribe = musicStore.subscribe(() => this.requestUpdate());
+    musicStore.setPlayer(this);
+  }
+
+  public disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this._unsubscribe?.();
+    if (musicStore.player === this) {
+      musicStore.setPlayer(undefined);
+    }
+  }
+
+  // Read by the Alexa Music List card
+  public get speakerName(): string | undefined {
+    return this._speakers.find(speaker => speaker.entity === this._active)?.name;
+  }
+
+  public get unavailable(): boolean {
+    const stateObj = this._active ? this.hass?.states[this._active] : undefined;
+    return !stateObj || stateObj.state === 'unavailable';
+  }
+
+  public get presets(): MusicItem[] {
+    return (this._config?.presets || []).map(preset => ({
+      name: preset.name,
+      query: preset.query,
+      provider: preset.provider,
+      subtitle: preset.provider ? PROVIDERS[preset.provider] : undefined,
+    }));
+  }
+
+  public playMusic(query: string, provider?: string, item?: MusicItem): Promise<void> {
+    return this._playMusic(query, provider, item);
+  }
+
   protected updated(changedProps: PropertyValues): void {
     super.updated(changedProps);
     if (!changedProps.has('hass') || !this.hass || !this._config) {
       return;
     }
-    if (!this._libraryLoaded) {
-      this._libraryLoaded = true;
-      loadLibrary(this.hass).then(library => {
-        this._library = library;
-        this._trackPlaying();
-      });
-      return;
+    if (musicStore.loaded) {
+      this._trackPlaying();
+    } else {
+      musicStore.load(this.hass).then(() => this._trackPlaying());
     }
-    this._trackPlaying();
   }
 
   private _trackPlaying(): void {
@@ -170,8 +184,8 @@ export class AlexaMusicPlayerCard extends LitElement {
       }
       this._lastTracks[speaker.entity] = key;
       const item = this._currentItem(speaker.entity);
-      if (item && !(this._library.recent[0] && sameItem(this._library.recent[0], item))) {
-        this._updateLibrary(addRecent(this._library, item));
+      if (item && !(musicStore.library.recent[0] && sameItem(musicStore.library.recent[0], item))) {
+        this._updateLibrary(addRecent(musicStore.library, item));
       }
     }
   }
@@ -193,19 +207,7 @@ export class AlexaMusicPlayerCard extends LitElement {
   }
 
   private _updateLibrary(library: MusicLibrary): void {
-    this._library = library;
-    clearTimeout(this._saveTimer);
-    this._saveTimer = window.setTimeout(() => saveLibrary(this.hass!, this._library), 1000);
-  }
-
-  private get _favorites(): MusicItem[] {
-    const presets = [...(this._config!.presets || []), ...(this._config!.favorites || [])].map(preset => ({
-      name: preset.name,
-      query: preset.query,
-      provider: preset.provider,
-      subtitle: preset.provider ? PROVIDERS[preset.provider] : undefined,
-    }));
-    return [...presets, ...this._library.favorites.filter(item => !presets.some(preset => sameItem(preset, item)))];
+    musicStore.update(library);
   }
 
   // Configured speakers, or every Alexa Media Player entity when none are configured
@@ -283,181 +285,109 @@ export class AlexaMusicPlayerCard extends LitElement {
 
     return html`
       <ha-card .header=${this._config.title}>
-        <div class="layout">
-          <div class="player">
-            <div class="speakers">
-              ${speakers.map(
-                speaker => html`
-                  <button
-                    class=${this._speakerClass(speaker.entity)}
-                    @click=${(): void => this._selectSpeaker(speaker.entity)}
-                  >
-                    ${speaker.name}
-                  </button>
-                `,
-              )}
-            </div>
-
-            <div class="now-playing">
-              <div
-                class="art"
-                style=${attrs.entity_picture ? `background-image: url("${this._artUrl(attrs.entity_picture)}")` : ''}
+        <div class="speakers">
+          ${speakers.map(
+            speaker => html`
+              <button
+                class=${this._speakerClass(speaker.entity)}
+                @click=${(): void => this._selectSpeaker(speaker.entity)}
               >
-                ${attrs.entity_picture ? '' : this._icon(mdiMusic)}
-              </div>
-              <div class="info">
-                <div class="title">${unavailable ? 'Unavailable' : attrs.media_title || 'Nothing playing'}</div>
-                <div class="artist">${attrs.media_artist || attrs.media_album_name || ''}</div>
-                <div class="source">${attrs.source || ''}</div>
-              </div>
-              ${this._renderFavoriteToggle(this._currentItem(this._active))}
-            </div>
-
-            <div class="controls">
-              ${this._button(mdiSkipPrevious, 'Previous', unavailable, () => this._control('media_previous_track'))}
-              ${this._button(
-                playing ? mdiPause : mdiPlay,
-                playing ? 'Pause' : 'Play',
-                unavailable,
-                () => this._control(playing ? 'media_pause' : 'media_play'),
-                'primary',
-              )}
-              ${this._button(mdiStop, 'Stop', unavailable, () => this._control('media_stop'))}
-              ${this._button(mdiSkipNext, 'Next', unavailable, () => this._control('media_next_track'))}
-            </div>
-
-            <div class="volume">
-              ${this._button(
-                attrs.is_volume_muted ? mdiVolumeOff : mdiVolumeHigh,
-                attrs.is_volume_muted ? 'Unmute' : 'Mute',
-                unavailable,
-                () => this._call('volume_mute', { is_volume_muted: !attrs.is_volume_muted }),
-              )}
-              ${this._button(mdiVolumeMinus, 'Volume down', unavailable, () => this._changeVolume(volume - 10))}
-              <input
-                type="range"
-                min="0"
-                max="100"
-                step="5"
-                aria-label="Volume"
-                .value=${String(volume)}
-                .disabled=${unavailable}
-                @change=${(ev: Event): void => this._changeVolume(Number((ev.target as HTMLInputElement).value))}
-              />
-              ${this._button(mdiVolumePlus, 'Volume up', unavailable, () => this._changeVolume(volume + 10))}
-              <span class="volume-level">${volume}%</span>
-            </div>
-
-            <form class="search" @submit=${this._search}>
-              <select .value=${this._provider} @change=${(ev: Event): void => this._setProvider(ev)}>
-                ${Object.entries(PROVIDERS).map(
-                  ([key, label]) => html`
-                    <option value=${key} ?selected=${key === this._provider}>${label}</option>
-                  `,
-                )}
-              </select>
-              <input
-                type="text"
-                placeholder="Song, artist, album or playlist"
-                .value=${this._query}
-                @input=${(ev: Event): void => {
-                  this._query = (ev.target as HTMLInputElement).value;
-                }}
-              />
-              <button class="icon-button" type="submit" title="Play" .disabled=${unavailable || !this._query.trim()}>
-                ${this._icon(mdiMagnify)}
+                ${speaker.name}
               </button>
-            </form>
-            ${this._error
-              ? html`
-                  <div class="error">${this._error}</div>
-                `
-              : ''}
-          </div>
-          ${this._config.show_list === false ? '' : this._renderList(unavailable)}
+            `,
+          )}
         </div>
+
+        <div class="now-playing">
+          <div
+            class="art"
+            style=${attrs.entity_picture ? `background-image: url("${this._artUrl(attrs.entity_picture)}")` : ''}
+          >
+            ${attrs.entity_picture ? '' : icon(mdiMusic)}
+          </div>
+          <div class="info">
+            <div class="title">${unavailable ? 'Unavailable' : attrs.media_title || 'Nothing playing'}</div>
+            <div class="artist">${attrs.media_artist || attrs.media_album_name || ''}</div>
+            <div class="source">${attrs.source || ''}</div>
+          </div>
+          ${this._renderFavoriteToggle(this._currentItem(this._active))}
+        </div>
+
+        <div class="controls">
+          ${iconButton(mdiSkipPrevious, 'Previous', unavailable, () => this._control('media_previous_track'))}
+          ${iconButton(
+            playing ? mdiPause : mdiPlay,
+            playing ? 'Pause' : 'Play',
+            unavailable,
+            () => this._control(playing ? 'media_pause' : 'media_play'),
+            'primary',
+          )}
+          ${iconButton(mdiStop, 'Stop', unavailable, () => this._control('media_stop'))}
+          ${iconButton(mdiSkipNext, 'Next', unavailable, () => this._control('media_next_track'))}
+        </div>
+
+        <div class="volume">
+          ${iconButton(
+            attrs.is_volume_muted ? mdiVolumeOff : mdiVolumeHigh,
+            attrs.is_volume_muted ? 'Unmute' : 'Mute',
+            unavailable,
+            () => this._call('volume_mute', { is_volume_muted: !attrs.is_volume_muted }),
+          )}
+          ${iconButton(mdiVolumeMinus, 'Volume down', unavailable, () => this._changeVolume(volume - 10))}
+          <input
+            type="range"
+            min="0"
+            max="100"
+            step="5"
+            aria-label="Volume"
+            .value=${String(volume)}
+            .disabled=${unavailable}
+            @change=${(ev: Event): void => this._changeVolume(Number((ev.target as HTMLInputElement).value))}
+          />
+          ${iconButton(mdiVolumePlus, 'Volume up', unavailable, () => this._changeVolume(volume + 10))}
+          <span class="volume-level">${volume}%</span>
+        </div>
+
+        <form class="search" @submit=${this._search}>
+          <select .value=${this._provider} @change=${(ev: Event): void => this._setProvider(ev)}>
+            ${Object.entries(PROVIDERS).map(
+              ([key, label]) => html`
+                <option value=${key} ?selected=${key === this._provider}>${label}</option>
+              `,
+            )}
+          </select>
+          <input
+            type="text"
+            placeholder="Song, artist, album or playlist"
+            .value=${this._query}
+            @input=${(ev: Event): void => {
+              this._query = (ev.target as HTMLInputElement).value;
+            }}
+          />
+          <button class="icon-button" type="submit" title="Play" .disabled=${unavailable || !this._query.trim()}>
+            ${icon(mdiMagnify)}
+          </button>
+        </form>
+        ${this._error
+          ? html`
+              <div class="error">${this._error}</div>
+            `
+          : ''}
       </ha-card>
     `;
   }
 
-  private _renderList(unavailable: boolean): TemplateResult {
-    const favorites = this._favorites;
-    const items = this._tab === 'favorites' ? favorites : this._library.recent;
-    return html`
-      <div class="library">
-        <div class="tabs">
-          <button
-            class="tab ${this._tab === 'favorites' ? 'active' : ''}"
-            @click=${(): void => {
-              this._tab = 'favorites';
-            }}
-          >
-            Favourites
-          </button>
-          <button
-            class="tab ${this._tab === 'recent' ? 'active' : ''}"
-            @click=${(): void => {
-              this._tab = 'recent';
-            }}
-          >
-            Recent
-          </button>
-        </div>
-        <div class="list">
-          ${items.length
-            ? items.map(item => this._renderItem(item, unavailable))
-            : html`
-                <div class="empty">
-                  ${this._tab === 'favorites'
-                    ? 'Tap ☆ next to a song to add it here.'
-                    : 'Songs you play will show up here.'}
-                </div>
-              `}
-        </div>
-      </div>
-    `;
-  }
-
-  private _renderItem(item: MusicItem, unavailable: boolean): TemplateResult {
-    return html`
-      <div class="item">
-        <button
-          class="item-play"
-          title="Play ${item.name}"
-          .disabled=${unavailable}
-          @click=${(): Promise<void> => this._playMusic(item.query, item.provider, item)}
-        >
-          <span class="thumb" style=${item.image ? `background-image: url("${item.image}")` : ''}>
-            ${item.image ? '' : this._icon(mdiMusic)}
-          </span>
-          <span class="item-text">
-            <span class="item-name">${item.name}</span>
-            <span class="item-sub">${item.subtitle || ''}</span>
-          </span>
-        </button>
-        ${this._renderFavoriteToggle(item, this._tab === 'favorites')}
-      </div>
-    `;
-  }
-
-  // Star to add or remove a favourite (an ✕ inside the Favourites tab). Presets from the config stay put.
-  private _renderFavoriteToggle(item?: MusicItem, inFavorites = false): TemplateResult | string {
-    if (!item) {
+  // Star the song that's playing to add it to the list card's Favourites
+  private _renderFavoriteToggle(item?: MusicItem): TemplateResult | string {
+    if (!item || this.presets.some(preset => sameItem(preset, item))) {
       return '';
     }
-    const saved = this._library.favorites.some(existing => sameItem(existing, item));
-    if (!saved && this._favorites.some(existing => sameItem(existing, item))) {
-      return '';
-    }
-    const toggle = (): void => this._updateLibrary(toggleFavorite(this._library, item));
-    if (inFavorites) {
-      return this._button(mdiClose, 'Remove from favourites', false, toggle);
-    }
-    return this._button(
+    const saved = musicStore.library.favorites.some(existing => sameItem(existing, item));
+    return iconButton(
       saved ? mdiStar : mdiStarOutline,
       saved ? 'Remove from favourites' : 'Add to favourites',
       false,
-      toggle,
+      () => this._updateLibrary(toggleFavorite(musicStore.library, item)),
       saved ? 'starred' : '',
     );
   }
@@ -475,6 +405,8 @@ export class AlexaMusicPlayerCard extends LitElement {
 
   private _selectSpeaker(entity: string): void {
     this._selected = entity;
+    // The list card shows which speaker it will play on
+    this.updateComplete.then(() => musicStore.notify());
   }
 
   private _setProvider(ev: Event): void {
@@ -511,34 +443,6 @@ export class AlexaMusicPlayerCard extends LitElement {
   private _changeVolume(percent: number): void {
     const level = Math.min(100, Math.max(0, percent)) / 100;
     this._call('volume_set', { volume_level: level });
-  }
-
-  // Plain buttons and inline SVG so the card doesn't depend on Home Assistant's internal elements
-  private _icon(path: string): TemplateResult {
-    return html`
-      <svg viewBox="0 0 24 24" aria-hidden="true">${svg`<path d=${path}></path>`}</svg>
-    `;
-  }
-
-  private _button(
-    path: string,
-    title: string,
-    disabled: boolean,
-    onClick: () => void,
-    extraClass = '',
-  ): TemplateResult {
-    return html`
-      <button
-        class="icon-button ${extraClass}"
-        type="button"
-        title=${title}
-        aria-label=${title}
-        .disabled=${disabled}
-        @click=${onClick}
-      >
-        ${this._icon(path)}
-      </button>
-    `;
   }
 
   private _search(ev: Event): void {
@@ -580,325 +484,185 @@ export class AlexaMusicPlayerCard extends LitElement {
       });
       this._refreshSoon([active]);
       this._updateLibrary(
-        addRecent(this._library, item || { name: request, query: request, provider, subtitle: service || 'Search' }),
+        addRecent(
+          musicStore.library,
+          item || { name: request, query: request, provider, subtitle: service || 'Search' },
+        ),
       );
     } catch (err) {
       this._error = `Couldn't play "${request}": ${(err as Error).message || err}`;
     }
   }
 
-  static get styles(): CSSResult {
-    return css`
-      ha-card {
-        box-sizing: border-box;
-        padding-bottom: 12px;
-      }
+  static get styles(): CSSResult[] {
+    return [
+      iconButtonStyles,
+      css`
+        ha-card {
+          box-sizing: border-box;
+          padding-bottom: 12px;
+        }
 
-      .icon-button {
-        flex: none;
-        width: 40px;
-        height: 40px;
-        padding: 8px;
-        border: none;
-        border-radius: 50%;
-        background: none;
-        color: var(--primary-text-color);
-        cursor: pointer;
-      }
+        .art svg {
+          display: block;
+          width: 100%;
+          height: 100%;
+          fill: currentColor;
+        }
 
-      .icon-button:hover:not(:disabled) {
-        background: var(--secondary-background-color);
-      }
+        .art svg {
+          width: 40px;
+          height: 40px;
+          fill: currentColor;
+        }
 
-      .icon-button.starred {
-        color: var(--primary-color);
-      }
+        .error {
+          padding: 0 16px 12px;
+          color: var(--error-color, #db4437);
+          font-size: 13px;
+        }
 
-      .icon-button:disabled {
-        opacity: 0.4;
-        cursor: default;
-      }
+        .warning {
+          padding: 16px;
+          color: var(--secondary-text-color);
+        }
 
-      .icon-button svg,
-      .art svg {
-        display: block;
-        width: 100%;
-        height: 100%;
-        fill: currentColor;
-      }
+        .speakers {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          padding: 0 16px 12px;
+        }
 
-      .art svg {
-        width: 40px;
-        height: 40px;
-      }
+        .chip {
+          border: 1px solid var(--divider-color);
+          border-radius: 16px;
+          padding: 6px 12px;
+          background: none;
+          color: var(--primary-text-color);
+          font: inherit;
+          font-size: 13px;
+          cursor: pointer;
+        }
 
-      .error {
-        padding: 0 16px 12px;
-        color: var(--error-color, #db4437);
-        font-size: 13px;
-      }
+        .chip.playing::before {
+          content: '♪ ';
+          color: var(--accent-color);
+        }
 
-      .layout {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: flex-start;
-      }
+        .chip.active {
+          background: var(--primary-color);
+          border-color: var(--primary-color);
+          color: var(--text-primary-color);
+        }
 
-      .player {
-        flex: 1 1 320px;
-        min-width: 0;
-      }
+        .chip:disabled {
+          opacity: 0.5;
+          cursor: default;
+        }
 
-      .library {
-        flex: 1 1 240px;
-        min-width: 0;
-        padding: 0 16px;
-      }
+        .now-playing {
+          display: flex;
+          align-items: center;
+          gap: 16px;
+          padding: 0 16px;
+        }
 
-      .tabs {
-        display: flex;
-        gap: 4px;
-        border-bottom: 1px solid var(--divider-color);
-        margin-bottom: 4px;
-      }
+        .art {
+          flex: none;
+          width: 88px;
+          height: 88px;
+          border-radius: 8px;
+          background-color: var(--secondary-background-color);
+          background-size: cover;
+          background-position: center;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: var(--secondary-text-color);
+        }
 
-      .tab {
-        flex: 1;
-        padding: 8px;
-        border: none;
-        border-bottom: 2px solid transparent;
-        background: none;
-        color: var(--secondary-text-color);
-        font: inherit;
-        font-size: 14px;
-        cursor: pointer;
-      }
+        .info {
+          min-width: 0;
+        }
 
-      .tab.active {
-        color: var(--primary-color);
-        border-bottom-color: var(--primary-color);
-      }
+        .title {
+          font-size: 18px;
+          font-weight: 500;
+        }
 
-      .list {
-        max-height: 340px;
-        overflow-y: auto;
-      }
+        .title,
+        .artist,
+        .source {
+          overflow: hidden;
+          white-space: nowrap;
+          text-overflow: ellipsis;
+        }
 
-      .empty {
-        padding: 16px 0;
-        color: var(--secondary-text-color);
-        font-size: 13px;
-        text-align: center;
-      }
+        .artist,
+        .source {
+          color: var(--secondary-text-color);
+        }
 
-      .item {
-        display: flex;
-        align-items: center;
-      }
+        .source {
+          font-size: 12px;
+        }
 
-      .item-play {
-        flex: 1;
-        min-width: 0;
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 6px 4px;
-        border: none;
-        border-radius: 8px;
-        background: none;
-        color: var(--primary-text-color);
-        font: inherit;
-        text-align: left;
-        cursor: pointer;
-      }
+        .controls {
+          display: flex;
+          justify-content: center;
+          padding: 8px 16px 0;
+        }
 
-      .item-play:hover:not(:disabled) {
-        background: var(--secondary-background-color);
-      }
+        .controls .primary {
+          width: 56px;
+          height: 56px;
+          color: var(--primary-color);
+        }
 
-      .item-play:disabled {
-        opacity: 0.5;
-        cursor: default;
-      }
+        .volume,
+        .search {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 0 16px;
+        }
 
-      .thumb {
-        flex: none;
-        width: 40px;
-        height: 40px;
-        border-radius: 4px;
-        background-color: var(--secondary-background-color);
-        background-size: cover;
-        background-position: center;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: var(--secondary-text-color);
-      }
+        .volume input {
+          flex: 1;
+          min-width: 60px;
+          accent-color: var(--primary-color);
+        }
 
-      .thumb svg {
-        width: 20px;
-        height: 20px;
-        fill: currentColor;
-      }
+        .volume-level {
+          width: 40px;
+          text-align: right;
+          color: var(--secondary-text-color);
+          font-size: 13px;
+        }
 
-      .item-text {
-        min-width: 0;
-        display: flex;
-        flex-direction: column;
-      }
+        .search {
+          padding-bottom: 12px;
+        }
 
-      .item-name,
-      .item-sub {
-        overflow: hidden;
-        white-space: nowrap;
-        text-overflow: ellipsis;
-      }
+        .search select,
+        .search input {
+          height: 36px;
+          box-sizing: border-box;
+          border: 1px solid var(--divider-color);
+          border-radius: 4px;
+          padding: 0 8px;
+          background: var(--card-background-color);
+          color: var(--primary-text-color);
+          font: inherit;
+        }
 
-      .item-sub {
-        color: var(--secondary-text-color);
-        font-size: 12px;
-      }
-
-      .warning {
-        padding: 16px;
-        color: var(--secondary-text-color);
-      }
-
-      .speakers {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        padding: 0 16px 12px;
-      }
-
-      .chip {
-        border: 1px solid var(--divider-color);
-        border-radius: 16px;
-        padding: 6px 12px;
-        background: none;
-        color: var(--primary-text-color);
-        font: inherit;
-        font-size: 13px;
-        cursor: pointer;
-      }
-
-      .chip.playing::before {
-        content: '♪ ';
-        color: var(--accent-color);
-      }
-
-      .chip.active {
-        background: var(--primary-color);
-        border-color: var(--primary-color);
-        color: var(--text-primary-color);
-      }
-
-      .chip:disabled {
-        opacity: 0.5;
-        cursor: default;
-      }
-
-      .now-playing {
-        display: flex;
-        align-items: center;
-        gap: 16px;
-        padding: 0 16px;
-      }
-
-      .art {
-        flex: none;
-        width: 88px;
-        height: 88px;
-        border-radius: 8px;
-        background-color: var(--secondary-background-color);
-        background-size: cover;
-        background-position: center;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        color: var(--secondary-text-color);
-      }
-
-      .info {
-        min-width: 0;
-      }
-
-      .title {
-        font-size: 18px;
-        font-weight: 500;
-      }
-
-      .title,
-      .artist,
-      .source {
-        overflow: hidden;
-        white-space: nowrap;
-        text-overflow: ellipsis;
-      }
-
-      .artist,
-      .source {
-        color: var(--secondary-text-color);
-      }
-
-      .source {
-        font-size: 12px;
-      }
-
-      .controls {
-        display: flex;
-        justify-content: center;
-        padding: 8px 16px 0;
-      }
-
-      .controls .primary {
-        width: 56px;
-        height: 56px;
-        color: var(--primary-color);
-      }
-
-      .volume,
-      .search {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 0 16px;
-      }
-
-      .volume input {
-        flex: 1;
-        min-width: 60px;
-        accent-color: var(--primary-color);
-      }
-
-      .volume-level {
-        width: 40px;
-        text-align: right;
-        color: var(--secondary-text-color);
-        font-size: 13px;
-      }
-
-      .search {
-        padding-bottom: 12px;
-      }
-
-      .search select,
-      .search input {
-        height: 36px;
-        box-sizing: border-box;
-        border: 1px solid var(--divider-color);
-        border-radius: 4px;
-        padding: 0 8px;
-        background: var(--card-background-color);
-        color: var(--primary-text-color);
-        font: inherit;
-      }
-
-      .search input {
-        flex: 1;
-        min-width: 0;
-      }
-    `;
+        .search input {
+          flex: 1;
+          min-width: 0;
+        }
+      `,
+    ];
   }
 }
 

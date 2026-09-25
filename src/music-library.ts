@@ -64,3 +64,65 @@ export const toggleFavorite = (library: MusicLibrary, item: MusicItem): MusicLib
     ? library.favorites.filter(existing => !sameItem(existing, item))
     : [item, ...library.favorites],
 });
+
+// What the list card needs from the player card on the same dashboard
+export interface MusicPlayer {
+  readonly speakerName?: string;
+  readonly unavailable: boolean;
+  readonly presets: MusicItem[];
+  playMusic(query: string, provider?: string, item?: MusicItem): Promise<void>;
+}
+
+// One shared copy of the library and the current player, so the player and list cards stay in sync
+class MusicStore {
+  public library: MusicLibrary = emptyLibrary();
+
+  public loaded = false;
+
+  public player?: MusicPlayer;
+
+  private _loading?: Promise<void>;
+
+  private _hass?: HomeAssistant;
+
+  private _saveTimer?: number;
+
+  private _listeners = new Set<() => void>();
+
+  public load(hass: HomeAssistant): Promise<void> {
+    this._hass = hass;
+    if (!this._loading) {
+      this._loading = loadLibrary(hass).then(library => {
+        this.library = library;
+        this.loaded = true;
+        this.notify();
+      });
+    }
+    return this._loading;
+  }
+
+  public update(library: MusicLibrary): void {
+    this.library = library;
+    this.notify();
+    clearTimeout(this._saveTimer);
+    this._saveTimer = window.setTimeout(() => this._hass && saveLibrary(this._hass, this.library), 1000);
+  }
+
+  public setPlayer(player?: MusicPlayer): void {
+    this.player = player;
+    this.notify();
+  }
+
+  public subscribe(listener: () => void): () => void {
+    this._listeners.add(listener);
+    return (): void => {
+      this._listeners.delete(listener);
+    };
+  }
+
+  public notify(): void {
+    this._listeners.forEach(listener => listener());
+  }
+}
+
+export const musicStore = new MusicStore();
