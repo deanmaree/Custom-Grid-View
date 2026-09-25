@@ -74,7 +74,8 @@ entities:
     alexa_name: Everywhere            # optional: the group's name in the Alexa app
 default_entity: media_player.kitchen_echo  # optional, otherwise the playing speaker (or the first one)
 provider: AMAZON_MUSIC  # AMAZON_MUSIC, SPOTIFY, APPLE_MUSIC, TUNEIN, DEEZER, IHEARTRADIO, PANDORA, SIRIUSXM, CLOUDPLAYER
-presets:                # optional one-tap buttons
+show_list: true         # Favourites / Recent list next to the player (false hides it)
+presets:                # optional, always shown at the top of Favourites
   - name: Chill
     query: chill playlist
   - name: Radio 2
@@ -83,6 +84,8 @@ presets:                # optional one-tap buttons
 ```
 
 Anything you type in the search box is sent to the speaker as a typed Alexa command, e.g. `play Taylor Swift on Spotify` (through `media_player.play_media` with `media_content_type: custom`). It works the same as saying it out loud, so the service must be linked in the Alexa app.
+
+The list next to the player has two tabs. **Recent** fills itself with songs that played on your speakers and your searches. **Favourites** shows your `presets` plus anything you star (☆). Tap an item to play it on the selected speaker. The list is saved in your Home Assistant user profile, so every dashboard and device you sign in on shares it.
 
 Speaker groups can't take typed commands, so for a group the card sends `play ... from <service> on <group name>` through one of your real speakers. The group name comes from Alexa Media Player; set `alexa_name` if it doesn't match the name in the Alexa app. After each playback action the card asks Home Assistant to refresh the speaker a few times, so new track details and artwork appear sooner.
 
