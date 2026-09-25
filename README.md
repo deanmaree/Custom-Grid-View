@@ -79,7 +79,7 @@ presets:                # optional one-tap buttons
     provider: TUNEIN
 ```
 
-Anything you type in the search box goes to `media_player.play_media` as `media_content_id`, with the chosen provider as `media_content_type`. It works like asking Alexa "play ... on Amazon Music".
+Anything you type in the search box is sent to the speaker as a typed Alexa command, e.g. `play Taylor Swift on Spotify` (through `media_player.play_media` with `media_content_type: custom`). It works the same as saying it out loud, so the service must be linked in the Alexa app.
 
 ### Notes
 

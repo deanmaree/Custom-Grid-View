@@ -28,7 +28,7 @@ import {
   TemplateResult,
 } from 'lit-element';
 
-// Content types understood by the Alexa Media Player integration's play_media service
+// Music services linked in the Alexa app, keyed by the names used in the card config
 const PROVIDERS: { [key: string]: string } = {
   AMAZON_MUSIC: 'Amazon Music',
   SPOTIFY: 'Spotify',
@@ -74,6 +74,8 @@ export class AlexaMusicPlayerCard extends LitElement {
   @internalProperty() private _provider = 'AMAZON_MUSIC';
 
   @internalProperty() private _query = '';
+
+  @internalProperty() private _error?: string;
 
   public static getStubConfig(): Partial<AlexaMusicPlayerCardConfig> {
     return { title: 'Music' };
@@ -228,7 +230,11 @@ export class AlexaMusicPlayerCard extends LitElement {
             ${this._icon(mdiMagnify)}
           </button>
         </form>
-
+        ${this._error
+          ? html`
+              <div class="error">${this._error}</div>
+            `
+          : ''}
         ${this._config.presets?.length
           ? html`
               <div class="presets">
@@ -237,7 +243,7 @@ export class AlexaMusicPlayerCard extends LitElement {
                     <button
                       class="chip"
                       .disabled=${unavailable}
-                      @click=${(): void => this._playMusic(preset.query, preset.provider)}
+                      @click=${(): Promise<void> => this._playMusic(preset.query, preset.provider)}
                     >
                       ${preset.name}
                     </button>
@@ -273,8 +279,8 @@ export class AlexaMusicPlayerCard extends LitElement {
     return picture.startsWith('/') ? (this.hass as any).hassUrl(picture) : picture;
   }
 
-  private _call(service: string, data: { [key: string]: any } = {}): void {
-    this.hass!.callService('media_player', service, { entity_id: this._active, ...data });
+  private _call(service: string, data: { [key: string]: any } = {}): Promise<unknown> {
+    return this.hass!.callService('media_player', service, { entity_id: this._active, ...data });
   }
 
   private _changeVolume(percent: number): void {
@@ -320,11 +326,19 @@ export class AlexaMusicPlayerCard extends LitElement {
     this._query = '';
   }
 
-  private _playMusic(query: string, provider?: string): void {
-    this._call('play_media', {
-      media_content_id: query,
-      media_content_type: provider || this._provider,
-    });
+  // Sent as a typed Alexa command ("play ... on Spotify"), the same as saying it to the speaker.
+  // This is more reliable than Alexa Media Player's music search content types.
+  private async _playMusic(query: string, provider?: string): Promise<void> {
+    const key = provider || this._provider;
+    const request = query.replace(/^play\s+/i, '');
+    const command =
+      key === 'CLOUDPLAYER' || !PROVIDERS[key] ? `play ${request}` : `play ${request} on ${PROVIDERS[key]}`;
+    this._error = undefined;
+    try {
+      await this._call('play_media', { media_content_id: command, media_content_type: 'custom' });
+    } catch (err) {
+      this._error = `Couldn't play "${request}": ${(err as Error).message || err}`;
+    }
   }
 
   static get styles(): CSSResult {
@@ -366,6 +380,12 @@ export class AlexaMusicPlayerCard extends LitElement {
       .art svg {
         width: 40px;
         height: 40px;
+      }
+
+      .error {
+        padding: 0 16px 12px;
+        color: var(--error-color, #db4437);
+        font-size: 13px;
       }
 
       .warning {
