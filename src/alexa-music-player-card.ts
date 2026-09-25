@@ -10,7 +10,9 @@ import {
   mdiSkipPrevious,
   mdiStop,
   mdiVolumeHigh,
+  mdiVolumeMinus,
   mdiVolumeOff,
+  mdiVolumePlus,
 } from '@mdi/js';
 import { HomeAssistant, LovelaceCardConfig } from 'custom-card-helpers';
 import { HassEntity } from 'home-assistant-js-websocket';
@@ -22,6 +24,7 @@ import {
   internalProperty,
   LitElement,
   property,
+  svg,
   TemplateResult,
 } from 'lit-element';
 
@@ -87,6 +90,11 @@ export class AlexaMusicPlayerCard extends LitElement {
 
   public getCardSize(): number {
     return 7;
+  }
+
+  // Sections dashboards: take the full width and grow to fit the content
+  public getGridOptions(): { columns: number; rows: string; min_columns: number } {
+    return { columns: 12, rows: 'auto', min_columns: 6 };
   }
 
   // Configured speakers, or every Alexa Media Player entity when none are configured
@@ -156,11 +164,7 @@ export class AlexaMusicPlayerCard extends LitElement {
             class="art"
             style=${attrs.entity_picture ? `background-image: url("${this._artUrl(attrs.entity_picture)}")` : ''}
           >
-            ${attrs.entity_picture
-              ? ''
-              : html`
-                  <ha-svg-icon .path=${mdiMusic}></ha-svg-icon>
-                `}
+            ${attrs.entity_picture ? '' : this._icon(mdiMusic)}
           </div>
           <div class="info">
             <div class="title">${unavailable ? 'Unavailable' : attrs.media_title || 'Nothing playing'}</div>
@@ -170,45 +174,37 @@ export class AlexaMusicPlayerCard extends LitElement {
         </div>
 
         <div class="controls">
-          <mwc-icon-button
-            .disabled=${unavailable}
-            title="Previous"
-            @click=${(): void => this._call('media_previous_track')}
-          >
-            <ha-svg-icon .path=${mdiSkipPrevious}></ha-svg-icon>
-          </mwc-icon-button>
-          <mwc-icon-button
-            class="primary"
-            .disabled=${unavailable}
-            title=${playing ? 'Pause' : 'Play'}
-            @click=${(): void => this._call(playing ? 'media_pause' : 'media_play')}
-          >
-            <ha-svg-icon .path=${playing ? mdiPause : mdiPlay}></ha-svg-icon>
-          </mwc-icon-button>
-          <mwc-icon-button .disabled=${unavailable} title="Stop" @click=${(): void => this._call('media_stop')}>
-            <ha-svg-icon .path=${mdiStop}></ha-svg-icon>
-          </mwc-icon-button>
-          <mwc-icon-button .disabled=${unavailable} title="Next" @click=${(): void => this._call('media_next_track')}>
-            <ha-svg-icon .path=${mdiSkipNext}></ha-svg-icon>
-          </mwc-icon-button>
+          ${this._button(mdiSkipPrevious, 'Previous', unavailable, () => this._call('media_previous_track'))}
+          ${this._button(
+            playing ? mdiPause : mdiPlay,
+            playing ? 'Pause' : 'Play',
+            unavailable,
+            () => this._call(playing ? 'media_pause' : 'media_play'),
+            'primary',
+          )}
+          ${this._button(mdiStop, 'Stop', unavailable, () => this._call('media_stop'))}
+          ${this._button(mdiSkipNext, 'Next', unavailable, () => this._call('media_next_track'))}
         </div>
 
         <div class="volume">
-          <mwc-icon-button
-            .disabled=${unavailable}
-            title=${attrs.is_volume_muted ? 'Unmute' : 'Mute'}
-            @click=${(): void => this._call('volume_mute', { is_volume_muted: !attrs.is_volume_muted })}
-          >
-            <ha-svg-icon .path=${attrs.is_volume_muted ? mdiVolumeOff : mdiVolumeHigh}></ha-svg-icon>
-          </mwc-icon-button>
+          ${this._button(
+            attrs.is_volume_muted ? mdiVolumeOff : mdiVolumeHigh,
+            attrs.is_volume_muted ? 'Unmute' : 'Mute',
+            unavailable,
+            () => this._call('volume_mute', { is_volume_muted: !attrs.is_volume_muted }),
+          )}
+          ${this._button(mdiVolumeMinus, 'Volume down', unavailable, () => this._changeVolume(volume - 10))}
           <input
             type="range"
             min="0"
             max="100"
+            step="5"
+            aria-label="Volume"
             .value=${String(volume)}
             .disabled=${unavailable}
-            @change=${this._setVolume}
+            @change=${(ev: Event): void => this._changeVolume(Number((ev.target as HTMLInputElement).value))}
           />
+          ${this._button(mdiVolumePlus, 'Volume up', unavailable, () => this._changeVolume(volume + 10))}
           <span class="volume-level">${volume}%</span>
         </div>
 
@@ -228,9 +224,9 @@ export class AlexaMusicPlayerCard extends LitElement {
               this._query = (ev.target as HTMLInputElement).value;
             }}
           />
-          <mwc-icon-button title="Play" .disabled=${unavailable || !this._query.trim()} @click=${this._search}>
-            <ha-svg-icon .path=${mdiMagnify}></ha-svg-icon>
-          </mwc-icon-button>
+          <button class="icon-button" type="submit" title="Play" .disabled=${unavailable || !this._query.trim()}>
+            ${this._icon(mdiMagnify)}
+          </button>
         </form>
 
         ${this._config.presets?.length
@@ -281,9 +277,37 @@ export class AlexaMusicPlayerCard extends LitElement {
     this.hass!.callService('media_player', service, { entity_id: this._active, ...data });
   }
 
-  private _setVolume(ev: Event): void {
-    const level = Number((ev.target as HTMLInputElement).value) / 100;
+  private _changeVolume(percent: number): void {
+    const level = Math.min(100, Math.max(0, percent)) / 100;
     this._call('volume_set', { volume_level: level });
+  }
+
+  // Plain buttons and inline SVG so the card doesn't depend on Home Assistant's internal elements
+  private _icon(path: string): TemplateResult {
+    return html`
+      <svg viewBox="0 0 24 24" aria-hidden="true">${svg`<path d=${path}></path>`}</svg>
+    `;
+  }
+
+  private _button(
+    path: string,
+    title: string,
+    disabled: boolean,
+    onClick: () => void,
+    extraClass = '',
+  ): TemplateResult {
+    return html`
+      <button
+        class="icon-button ${extraClass}"
+        type="button"
+        title=${title}
+        aria-label=${title}
+        .disabled=${disabled}
+        @click=${onClick}
+      >
+        ${this._icon(path)}
+      </button>
+    `;
   }
 
   private _search(ev: Event): void {
@@ -306,10 +330,42 @@ export class AlexaMusicPlayerCard extends LitElement {
   static get styles(): CSSResult {
     return css`
       ha-card {
-        height: 100%;
         box-sizing: border-box;
         padding-bottom: 12px;
-        overflow: hidden;
+      }
+
+      .icon-button {
+        flex: none;
+        width: 40px;
+        height: 40px;
+        padding: 8px;
+        border: none;
+        border-radius: 50%;
+        background: none;
+        color: var(--primary-text-color);
+        cursor: pointer;
+      }
+
+      .icon-button:hover:not(:disabled) {
+        background: var(--secondary-background-color);
+      }
+
+      .icon-button:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+
+      .icon-button svg,
+      .art svg {
+        display: block;
+        width: 100%;
+        height: 100%;
+        fill: currentColor;
+      }
+
+      .art svg {
+        width: 40px;
+        height: 40px;
       }
 
       .warning {
@@ -406,8 +462,8 @@ export class AlexaMusicPlayerCard extends LitElement {
       }
 
       .controls .primary {
-        --mdc-icon-button-size: 56px;
-        --mdc-icon-size: 40px;
+        width: 56px;
+        height: 56px;
         color: var(--primary-color);
       }
 
@@ -421,6 +477,7 @@ export class AlexaMusicPlayerCard extends LitElement {
 
       .volume input {
         flex: 1;
+        min-width: 60px;
         accent-color: var(--primary-color);
       }
 
