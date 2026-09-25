@@ -49,16 +49,30 @@ interface MusicPreset {
 
 interface AlexaMusicPlayerCardConfig extends LovelaceCardConfig {
   title?: string;
-  entities?: Array<string | { entity: string; name?: string }>;
+  entities?: Array<string | SpeakerConfig>;
   default_entity?: string;
   provider?: string;
   presets?: MusicPreset[];
 }
 
+interface SpeakerConfig {
+  entity: string;
+  name?: string;
+  // Speaker groups only: the group's name in the Alexa app, if it differs from Home Assistant's
+  alexa_name?: string;
+}
+
 interface Speaker {
   entity: string;
   name: string;
+  alexaName?: string;
 }
+
+// Alexa Media Player shows the Alexa app's multi-room groups as devices with this model
+const GROUP_MODEL = 'Speaker Group';
+
+// How often to re-poll a speaker after a playback action so new track details and art show sooner
+const REFRESH_DELAYS = [1500, 4000, 8000];
 
 @customElement('alexa-music-player-card')
 export class AlexaMusicPlayerCard extends LitElement {
@@ -108,7 +122,7 @@ export class AlexaMusicPlayerCard extends LitElement {
       return this._config!.entities.map(conf =>
         typeof conf === 'string'
           ? { entity: conf, name: name(conf) }
-          : { entity: conf.entity, name: conf.name || name(conf.entity) },
+          : { entity: conf.entity, name: conf.name || name(conf.entity), alexaName: conf.alexa_name },
       );
     }
 
@@ -116,6 +130,32 @@ export class AlexaMusicPlayerCard extends LitElement {
     const players = Object.keys(hass.states).filter(entity => entity.startsWith('media_player.'));
     const alexa = registry ? players.filter(entity => registry[entity]?.platform === 'alexa_media') : [];
     return (alexa.length ? alexa : players).map(entity => ({ entity, name: name(entity) }));
+  }
+  private _isGroup(entity: string): boolean {
+    const hass = this.hass as any;
+    const deviceId = hass.entities?.[entity]?.device_id;
+    return hass.devices?.[deviceId]?.model === GROUP_MODEL;
+  }
+
+  // Groups can't take typed commands, so a real speaker is asked to play on the group instead
+  private _commandSpeaker(): string | undefined {
+    const hass = this.hass as any;
+    const candidates = [
+      ...this._speakers.map(speaker => speaker.entity),
+      ...Object.keys(hass.entities || {}).filter(
+        entity => entity.startsWith('media_player.') && hass.entities[entity].platform === 'alexa_media',
+      ),
+    ];
+    return candidates.find(
+      entity => !this._isGroup(entity) && hass.states[entity] && hass.states[entity].state !== 'unavailable',
+    );
+  }
+
+  private _groupName(entity: string): string {
+    const hass = this.hass as any;
+    const configured = this._speakers.find(speaker => speaker.entity === entity)?.alexaName;
+    const device = hass.devices?.[hass.entities?.[entity]?.device_id];
+    return configured || device?.name || hass.states[entity]?.attributes.friendly_name || entity;
   }
 
   protected render(): TemplateResult {
@@ -176,16 +216,16 @@ export class AlexaMusicPlayerCard extends LitElement {
         </div>
 
         <div class="controls">
-          ${this._button(mdiSkipPrevious, 'Previous', unavailable, () => this._call('media_previous_track'))}
+          ${this._button(mdiSkipPrevious, 'Previous', unavailable, () => this._control('media_previous_track'))}
           ${this._button(
             playing ? mdiPause : mdiPlay,
             playing ? 'Pause' : 'Play',
             unavailable,
-            () => this._call(playing ? 'media_pause' : 'media_play'),
+            () => this._control(playing ? 'media_pause' : 'media_play'),
             'primary',
           )}
-          ${this._button(mdiStop, 'Stop', unavailable, () => this._call('media_stop'))}
-          ${this._button(mdiSkipNext, 'Next', unavailable, () => this._call('media_next_track'))}
+          ${this._button(mdiStop, 'Stop', unavailable, () => this._control('media_stop'))}
+          ${this._button(mdiSkipNext, 'Next', unavailable, () => this._control('media_next_track'))}
         </div>
 
         <div class="volume">
@@ -283,6 +323,25 @@ export class AlexaMusicPlayerCard extends LitElement {
     return this.hass!.callService('media_player', service, { entity_id: this._active, ...data });
   }
 
+  private async _control(service: string): Promise<void> {
+    this._error = undefined;
+    try {
+      await this._call(service);
+      this._refreshSoon([this._active!]);
+    } catch (err) {
+      this._error = (err as Error).message || String(err);
+    }
+  }
+
+  // Alexa Media Player only polls Amazon now and then; ask for fresh state a few times after a change
+  private _refreshSoon(entities: string[]): void {
+    REFRESH_DELAYS.forEach(delay =>
+      setTimeout(() => {
+        this.hass!.callService('homeassistant', 'update_entity', { entity_id: entities }).catch(() => undefined);
+      }, delay),
+    );
+  }
+
   private _changeVolume(percent: number): void {
     const level = Math.min(100, Math.max(0, percent)) / 100;
     this._call('volume_set', { volume_level: level });
@@ -331,11 +390,29 @@ export class AlexaMusicPlayerCard extends LitElement {
   private async _playMusic(query: string, provider?: string): Promise<void> {
     const key = provider || this._provider;
     const request = query.replace(/^play\s+/i, '');
-    const command =
-      key === 'CLOUDPLAYER' || !PROVIDERS[key] ? `play ${request}` : `play ${request} on ${PROVIDERS[key]}`;
+    const service = key === 'CLOUDPLAYER' ? undefined : PROVIDERS[key];
+    const active = this._active!;
     this._error = undefined;
+
+    let target = active;
+    let command = service ? `play ${request} on ${service}` : `play ${request}`;
+    if (this._isGroup(active)) {
+      const speaker = this._commandSpeaker();
+      if (!speaker) {
+        this._error = 'No available Alexa speaker to send the request through.';
+        return;
+      }
+      target = speaker;
+      command = `play ${request}${service ? ` from ${service}` : ''} on ${this._groupName(active)}`;
+    }
+
     try {
-      await this._call('play_media', { media_content_id: command, media_content_type: 'custom' });
+      await this.hass!.callService('media_player', 'play_media', {
+        entity_id: target,
+        media_content_id: command,
+        media_content_type: 'custom',
+      });
+      this._refreshSoon([active]);
     } catch (err) {
       this._error = `Couldn't play "${request}": ${(err as Error).message || err}`;
     }

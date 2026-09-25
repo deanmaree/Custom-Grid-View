@@ -69,6 +69,9 @@ entities:
   - media_player.kitchen_echo
   - entity: media_player.bedroom_echo_dot
     name: Bedroom
+  - entity: media_player.everywhere   # Alexa multi-room speaker group
+    name: Everywhere
+    alexa_name: Everywhere            # optional: the group's name in the Alexa app
 default_entity: media_player.kitchen_echo  # optional, otherwise the playing speaker (or the first one)
 provider: AMAZON_MUSIC  # AMAZON_MUSIC, SPOTIFY, APPLE_MUSIC, TUNEIN, DEEZER, IHEARTRADIO, PANDORA, SIRIUSXM, CLOUDPLAYER
 presets:                # optional one-tap buttons
@@ -80,6 +83,8 @@ presets:                # optional one-tap buttons
 ```
 
 Anything you type in the search box is sent to the speaker as a typed Alexa command, e.g. `play Taylor Swift on Spotify` (through `media_player.play_media` with `media_content_type: custom`). It works the same as saying it out loud, so the service must be linked in the Alexa app.
+
+Speaker groups can't take typed commands, so for a group the card sends `play ... from <service> on <group name>` through one of your real speakers. The group name comes from Alexa Media Player; set `alexa_name` if it doesn't match the name in the Alexa app. After each playback action the card asks Home Assistant to refresh the speaker a few times, so new track details and artwork appear sooner.
 
 ### Notes
 
