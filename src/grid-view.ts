@@ -25,6 +25,7 @@ import 'lit-grid-layout';
 import { classMap } from 'lit-html/directives/class-map';
 import { v4 as uuidv4 } from 'uuid';
 import { nextRender, replaceView } from './functions';
+import './alexa-music-player-card';
 import './hui-grid-card-options';
 import { HuiGridCardOptions } from './hui-grid-card-options';
 

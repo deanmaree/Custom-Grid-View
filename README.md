@@ -55,6 +55,32 @@ cards: []
 
 > :warning: **Users using YAML mode only will not have a good time :)**
 
+## Alexa Music Player card
+
+`grid-view.js` also registers an `alexa-music-player-card`. Use it to pick an Alexa speaker, control playback and volume, and search for music to play on the speaker you picked.
+
+It needs the [Alexa Media Player](https://github.com/alandtse/alexa_media_player) integration (installable through HACS).
+
+```yaml
+type: custom:alexa-music-player-card
+title: Music
+# Optional. When left out, every Alexa Media Player speaker is listed.
+entities:
+  - media_player.kitchen_echo
+  - entity: media_player.bedroom_echo_dot
+    name: Bedroom
+default_entity: media_player.kitchen_echo  # optional, otherwise the playing speaker (or the first one)
+provider: AMAZON_MUSIC  # AMAZON_MUSIC, SPOTIFY, APPLE_MUSIC, TUNEIN, DEEZER, IHEARTRADIO, PANDORA, SIRIUSXM, CLOUDPLAYER
+presets:                # optional one-tap buttons
+  - name: Chill
+    query: chill playlist
+  - name: Radio 2
+    query: BBC Radio 2
+    provider: TUNEIN
+```
+
+Anything you type in the search box goes to `media_player.play_media` as `media_content_id`, with the chosen provider as `media_content_type`. It works like asking Alexa "play ... on Amazon Music".
+
 ### Notes
 
 * This is not the finished version
